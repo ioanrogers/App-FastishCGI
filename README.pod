@@ -1,0 +1,27 @@
+=pod
+
+=head1 FastishCGI
+
+=head2 Synopsis
+
+A CGI-FastCGI bridge, primarily for nginx which doesn't support CGI directly.
+
+=head2 Installing
+
+=over 2
+
+=item from Github
+
+    git clone http://github.com/ioanrogers/App-FastishCGI.git
+    cd App-FastishCGI
+    dzil install
+
+=back
+
+=head2 About
+
+Originally based on
+http://wiki.nginx.org/NginxSimpleCGI
+
+=cut
+
