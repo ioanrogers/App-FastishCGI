@@ -12,8 +12,8 @@ A CGI-FastCGI bridge, primarily for nginx which doesn't support CGI directly.
 
 =item from Github
 
-    git clone http://github.com/ioanrogers/App-FastishCGI.git
-    cd App-FastishCGI
+    git clone http://github.com/ioanrogers/app-fastishcgi.git
+    cd app-fastishchi
     dzil install
 
 =back
