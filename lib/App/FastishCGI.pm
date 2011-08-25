@@ -5,7 +5,7 @@ use warnings;
 
 # ABSTRACT: provide CGI support to webservers which don't have it
 
-use FCGI::Async;
+use Net::Async::FastCGI;
 use IO::Async::Loop;
 use Data::Dumper;
 use File::Basename;
@@ -14,42 +14,23 @@ use IO::Handle;
 use Sys::Syslog;
 use Carp;
 
-use POSIX qw(setsid);
+sub daemonise {
 
-# lifted straight from perldoc
-# should allow setting directory to change to?
-sub daemonize {
-
-    chdir '/'
-      or die "Can't chdir to /: $!";
-
-    open STDIN, '/dev/null'
-      or die "Can't read /dev/null: $!";
-    open STDOUT, '>/dev/null'
-      or die "Can't write to /dev/null: $!";
-
-    defined( my $pid = fork )
-      or die "Can't fork: $!";
-
-    exit if $pid;
-
-    setsid
-      or die "Can't start a new session: $!";
-
-    open STDERR, '>&STDOUT' or die "Can't dup stdout: $!";
-
+    # TODO optionally use an existing CPAN mod to daemonise for
+    # systems that don't use systemd or upstart
+    log_info('"daemonise" is not available');
     return;
 }
 
 sub set_signal_handlers {
+    my ($self) = @_;
 
-    $SIG{INT} = sub { log_info("Received SIGINT... Going down"); exit };
-}
-
-sub log_msg {
-    my ( $pri, $err_str ) = @_;
-
-    return;
+    $SIG{TERM} = sub { log_info("Received SIGTERM... Shutting down"); exit };
+    $SIG{INT} = sub {
+        log_info("Received SIGINT... Shutting down");
+        $self->{sock}->shutdown(2);
+        exit;
+    };
 }
 
 sub log_error {
@@ -126,9 +107,7 @@ sub setup_env {
 
 sub request_loop {
     my ( $self, $fcgi, $req ) = @_;
-    print $self;
-    print $fcgi, print $req;
-
+    
     $req->set_encoding(undef);    # preserve whatever the script sends
 
     my $script_filename = $req->param('SCRIPT_FILENAME');
@@ -208,19 +187,36 @@ sub new {
     my $class = ref($this) || $this;
     my %opt   = ( ref $_[0] eq 'HASH' ) ? %{ $_[0] } : @_;
     my $self  = bless \%opt, $class;
-    print Dumper($self);
-    $self->init;
+    $self->log_debug(Dumper($self)) if $self->{debug};
+    $self->_init;
     return $self;
 }
 
-sub init {
+sub _init {
     my $self = shift;
-    $self->set_signal_handlers();
+    $self->set_signal_handlers;
 
     openlog( 'fastishcgi', "ndelay,pid", 'user' );
 
-    if ( !$self->{foreground} ) {
-        $self->daemonize();
+    if ( $self->{daemonise} ) {
+        $self->daemonise();
+    }
+
+    # TODO IO::Socket::INET6
+    if ( defined $self->{socket} ) {
+        $self->log_debug( sprintf 'Listening on UNIX socket: %s', $self->{socket} );
+
+# TODO deleting the socket file avoids address in use errors, but how to use systemd's socket stuff?
+        unlink $self->{socket} if -e $self->{socket};
+        $self->{sock} = IO::Socket::UNIX->new( Local => $self->{socket}, Listen => 1 )
+          or die $!;
+    } else {
+        $self->log_debug( sprintf 'Listening on INET socket: %s:%s', $self->{ip}, $self->{port} );
+        $self->{sock} = IO::Socket::INET->new(
+            LocalAddr => $self->{ip},
+            LocalPort => $self->{port},
+            Listen    => 1
+        );
     }
 
 }
@@ -229,30 +225,25 @@ sub start_listening {
 
     my $self = shift;
 
-    my $loop = IO::Async::Loop->new();
-    my $fcgi = FCGI::Async->new(
+    my $fcgi = Net::Async::FastCGI->new(
+        handle     => $self->{sock},
         on_request => sub {
             my ( $fcgi, $req ) = @_;
             $self->request_loop( $fcgi, $req ),;
-        }
+        },
+
+        #on_listen_error  => sub { $self->log_die("Cannot listen\n"); },
+        #on_resolve_error => sub { $self->log_error("Cannot resolve - $_[0]\n"); },
     );
+
+    $self->log_debug('Entering listen loop');
+    my $loop = IO::Async::Loop->new();
 
     $loop->add($fcgi);
 
-    my %listen_args = (
-        service          => $self->{port},
-        on_listen_error  => sub { log_die("Cannot listen\n"); },
-        on_resolve_error => sub { log_die("Cannot resolve - $_[0]\n"); },
-    );
-
-    if ( defined $self->{ip} ) {
-        $listen_args{host} = $self->{ip};
-    }
-
-    $fcgi->listen(%listen_args);
-
-    $self->log_debug('Entering listen loop');
+    #   $fcgi->listen(%listen_args);
     $loop->loop_forever;
+
 }
 
 1;
@@ -264,4 +255,3 @@ __END__
 App::FastishCGI
 
 =cut
-
