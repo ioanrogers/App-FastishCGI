@@ -5,8 +5,10 @@ use warnings;
 
 # ABSTRACT: provide CGI support to webservers which don't have it
 
-use Net::Async::FastCGI;
-use IO::Async::Loop;
+use AnyEvent;
+use AnyEvent::Handle;
+use AnyEvent::FCGI;
+
 use Data::Dumper;
 use File::Basename;
 use IPC::Open3 qw//;
@@ -14,23 +16,23 @@ use IO::Handle;
 use Sys::Syslog;
 use Carp;
 
-sub daemonise {
+# TODO optionally use an existing CPAN mod to daemonise for
+# systems that don't use systemd or upstart
 
-    # TODO optionally use an existing CPAN mod to daemonise for
-    # systems that don't use systemd or upstart
-    log_info('"daemonise" is not available');
-    return;
+sub shutdown_signal {
+    my ( $self, $SIG ) = @_;
+    $self->log_info( sprintf 'Received SIG%s. Shutting down after handling %d requests',
+        $SIG, $self->{requests_total} );
+    exit;
 }
 
 sub set_signal_handlers {
     my ($self) = @_;
 
-    $SIG{TERM} = sub { log_info("Received SIGTERM... Shutting down"); exit };
-    $SIG{INT} = sub {
-        log_info("Received SIGINT... Shutting down");
-        $self->{sock}->shutdown(2);
-        exit;
-    };
+    $self->{sigint} =
+      AnyEvent->signal( signal => "INT", cb => sub { $self->shutdown_signal('INT') } );
+    $self->{sigterm} =
+      AnyEvent->signal( signal => "TERM", cb => sub { $self->shutdown_signal('TERM') } );
 }
 
 sub log_error {
@@ -45,7 +47,7 @@ sub log_error {
 }
 
 sub log_info {
-    syslog( 'info', $_[0] );
+    syslog( 'info', $_[1] );
     return;
 }
 
@@ -64,25 +66,36 @@ sub log_debug {
 
 sub html_error {
     my ( $self, $req, $err_str ) = @_;
+
     $self->log_error( $err_str, $req );
 
-    $req->print_stdout("Content-type: text/html\r\n\r\n");
+    my $html_str = <<HTML;
+<html>
+<head>
+<title>CGI Error:: %s</title>
+%s
+<head>
+<body>
+<h1>CGI Error</h2>
+<h2>Filename: %s</h2>
+<blockquote class="err_msg">%s</blockquote>
+<pre class="err_dump">
+%s
+</pre>
+</body>
+</html>
 
-    my $html =
-        "<html>\n"
-      . "<body>\n"
-      . "<h1>CGI Error</h2>\n"
-      . "<h2>Filename: "
-      . $req->param('SCRIPT_FILENAME')
-      . "</h2>\n"
-      . "<blockquote>$err_str</blockquote>" . "<pre>"
-      . Dumper( $req->params )
-      . "</pre>"
-      . "</body>\n"
-      . "</html>\n";
+HTML
 
-    $req->print_stdout($html);
-    $req->finish(500);
+    my $html = sprintf $html_str, $req->param('SCRIPT_FILENAME'), $self->{css},
+      $req->param('SCRIPT_FILENAME'),
+      $err_str, Dumper( $req->params );
+
+    $req->respond(
+        $html,
+        'Content-Type' => 'text/html',
+        'Status'       => 500
+    );
     return;
 }
 
@@ -105,27 +118,43 @@ sub setup_env {
     return;
 }
 
+sub show_active_requests {
+    my ($self) = @_;
+
+    my $reqs = 'Active requests [' . $self->{requests_total} .']';
+    foreach my $key ( keys %{ $self->{requests} } ) {
+        $reqs .= " $key,";
+    }
+    $self->log_debug($reqs);
+
+}
+
+sub clear_request {
+    my ( $self, $rid ) = @_;
+
+    delete $self->{requests}->{$rid};
+    $self->log_debug("Removed request $rid");
+
+}
+
 sub request_loop {
-    my ( $self, $fcgi, $req ) = @_;
-    
-    $req->set_encoding(undef);    # preserve whatever the script sends
+    my ( $self, $req ) = @_;
+
+    $self->{requests_total}++;
+    my $rid = $self->{requests_total};
+    $self->{requests}->{$rid}->{buffer} = '';
 
     my $script_filename = $req->param('SCRIPT_FILENAME');
     my $script_dir      = dirname $script_filename;
 
-    $self->log_debug("Request for '$script_filename'");
-    $self->log_debug( Dumper( $req->params ) );
-
-    chdir $script_dir;            # for scripts that use relative paths
-
-    my $post_data;
-    if ( ( $req->param('REQUEST_METHOD') eq 'POST' ) && ( $req->param('CONTENT_LENGTH') + 0 > 0 ) )
-    {
-        my $req_len = 0 + $req->param('CONTENT_LENGTH');
-        $self->log_debug( "Request length " . $req_len );
-        $post_data = $req->read_stdin($req_len);
+    if ( $self->{debug} ) {
+        $self->log_debug( sprintf '[%d] New request for "%s"', $rid, $script_filename );
+        $self->log_debug( "[$rid] Request Object:\n" . Dumper( $req->params ) );
+        $self->log_debug("[$rid] Setting environment");
     }
+    $self->setup_env($req);
 
+    chdir $script_dir;    # for scripts that use relative paths
     if (   ( !-x $script_filename )
         && ( !-s $script_filename )
         && ( !-r $script_filename ) )
@@ -135,12 +164,9 @@ sub request_loop {
         return;
     }
 
-    $self->setup_env($req);
     $self->log_debug( "Running " . $script_filename );
 
-    my $wtr = IO::Handle->new;
-    my $rdr = IO::Handle->new;
-    my $err = IO::Handle->new;
+    my ( $wtr, $rdr, $err );
 
     my $pid = IPC::Open3::open3( $wtr, $rdr, $err, $script_filename );
 
@@ -149,34 +175,57 @@ sub request_loop {
         return;
     }
 
-    if ( defined $post_data ) {
-        $self->log_debug( "post data " . $post_data );
+    if ( ( $req->param('REQUEST_METHOD') eq 'POST' ) && ( $req->param('CONTENT_LENGTH') + 0 > 0 ) )
+    {
+        my $req_len = 0 + $req->param('CONTENT_LENGTH');
+        $self->log_debug("[$rid] Request length $req_len");
+        my $post_data = $req->read_stdin($req_len);
+        $self->log_debug("[$rid] POST data $post_data");
         $wtr->print($post_data);
     }
 
-    # if there isn't a content type header, nginx gives a 502
-    # is it worth us checking and inserting one?
-    while (1) {
-        if ( my $in = $rdr->getline ) {
-            $req->print_stdout($in);
-        }
-        if ( my $in2 = $err->getline ) {
-            $self->log_error( $in2, $req );
-        }
-        if ( $rdr->eof ) {
-            last;
-        }
+    $self->{requests}->{$rid}->{handle} = AnyEvent::Handle->new(
+        fh      => $rdr,
+        on_read => sub {
+            $self->{requests}->{$rid}->{buffer} .= $_[0]->rbuf;
+            $_[0]->rbuf = '';
+        },
+        on_eof => sub {
+            undef $self->{requests}->{$rid}->{handle};
+        },
+    );
 
-    }
-    waitpid( $pid, 0 );
+    $self->{requests}->{$rid}->{child} = AnyEvent->child(
+        pid => $pid,
+        cb  => sub {
+            my ( $pid, $return_val ) = @_;
+            my $status = $return_val >> 8;
 
-    if ( $? != 0 ) {
-        my $child_exit_status = $? >> 8;
-        $self->log_error(
-            "Script $script_filename exited abnormally, with status: $child_exit_status");
-    }
+            # XXX the cgi spec, as far as I have found, is like shell scripting in
+            # that scripts should return 0 on success. However some of the scripts I
+            # need to use return 1 instead.
+            if ( $status != 0 && $status != 1 ) {
+                $self->html_error( $req,
+                    "Script $script_filename exited abnormally, with status: $status" );
+            } else {
+                $self->log_debug("[$rid] Script $script_filename completed");
+                $req->print_stdout( $self->{requests}->{$rid}->{buffer} );
+                $req->finish;
+            }
+            $self->clear_request($rid);
+        },
+    );
 
-    $req->finish(200);
+    $self->{requests}->{$rid}->{timer} = AnyEvent->timer(
+        after => $self->{timeout},
+        cb    => sub {
+            $self->html_error($req, "Script '$script_filename' exceeded timeout value");
+            $self->clear_request($rid);
+        }
+    );
+
+    $self->log_debug("[$rid] setup");
+    $self->show_active_requests if $self->{debug};
 
     return;
 
@@ -187,8 +236,9 @@ sub new {
     my $class = ref($this) || $this;
     my %opt   = ( ref $_[0] eq 'HASH' ) ? %{ $_[0] } : @_;
     my $self  = bless \%opt, $class;
-    $self->log_debug(Dumper($self)) if $self->{debug};
+    $self->log_debug( Dumper($self) ) if $self->{debug};
     $self->_init;
+
     return $self;
 }
 
@@ -198,51 +248,48 @@ sub _init {
 
     openlog( 'fastishcgi', "ndelay,pid", 'user' );
 
-    if ( $self->{daemonise} ) {
-        $self->daemonise();
+    # stylesheet is a url or path for web server. If none is supplied add default
+    if ( $self->{css} ) {
+        $self->{css} = sprintf '<link href="%s" rel="stylesheet" type="text/css">', $self->{css};
+    } else {
+        $self->{css} = <<CSS;
+<style type="text/css">
+pre { padding: 1em; border: 2px solid white }
+body {color: red; background-color: black; }
+</style>
+CSS
+
     }
+
+    $self->{requests_total} = 0;
+    $self->{requests}       = {};
+
+}
+
+sub main_loop {
+
+    my $self = shift;
+    my $fcgi;
 
     # TODO IO::Socket::INET6
     if ( defined $self->{socket} ) {
         $self->log_debug( sprintf 'Listening on UNIX socket: %s', $self->{socket} );
+        $fcgi = new AnyEvent::FCGI(
+            socket     => $self->{socket},
+            on_request => sub { $self->request_loop(@_); }
+        );
 
-# TODO deleting the socket file avoids address in use errors, but how to use systemd's socket stuff?
-        unlink $self->{socket} if -e $self->{socket};
-        $self->{sock} = IO::Socket::UNIX->new( Local => $self->{socket}, Listen => 1 )
-          or die $!;
     } else {
         $self->log_debug( sprintf 'Listening on INET socket: %s:%s', $self->{ip}, $self->{port} );
-        $self->{sock} = IO::Socket::INET->new(
-            LocalAddr => $self->{ip},
-            LocalPort => $self->{port},
-            Listen    => 1
+        $fcgi = new AnyEvent::FCGI(
+            port       => $self->{port},
+            host       => $self->{ip},
+            on_request => sub { $self->request_loop(@_) }
         );
     }
 
-}
-
-sub start_listening {
-
-    my $self = shift;
-
-    my $fcgi = Net::Async::FastCGI->new(
-        handle     => $self->{sock},
-        on_request => sub {
-            my ( $fcgi, $req ) = @_;
-            $self->request_loop( $fcgi, $req ),;
-        },
-
-        #on_listen_error  => sub { $self->log_die("Cannot listen\n"); },
-        #on_resolve_error => sub { $self->log_error("Cannot resolve - $_[0]\n"); },
-    );
-
-    $self->log_debug('Entering listen loop');
-    my $loop = IO::Async::Loop->new();
-
-    $loop->add($fcgi);
-
-    #   $fcgi->listen(%listen_args);
-    $loop->loop_forever;
+    $self->log_debug( 'Entering main listen loop using ' . $AnyEvent::MODEL );
+    AnyEvent::CondVar->recv;
 
 }
 
@@ -255,3 +302,4 @@ __END__
 App::FastishCGI
 
 =cut
+
