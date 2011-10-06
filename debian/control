@@ -1,0 +1,14 @@
+Source: fastishcgi
+Section: perl
+Priority: optional
+Build-Depends: debhelper (>= 7), perl (>= 5.10) | libmodule-build-perl
+Build-Depends-Indep: perl (>= 5.10.0),
+Maintainer: Ioan Rogers <ioan.rogers@gmail.com>
+Standards-Version: 3.8.3
+Homepage: https://github.com/ioanrogers/app-fastishcgi
+
+Package: fastishcgi
+Architecture: all
+Depends: ${perl:Depends}, ${misc:Depends}, libanyevent-fcgi-perl, libanyevent-perl
+Description: FastCGI <-> CGI bridge
+ A daemon to run CGI scripts through a FastCGI interface. Primarily for nginx, which lacks CGI support
