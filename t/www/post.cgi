@@ -1,4 +1,4 @@
-#!env perl
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
@@ -14,7 +14,6 @@ print $q->header
  . "<hr>"
  . $q->h2('POST Dump');
 
-my $params = $q->Vars;
-print "<blockquote>" . Dump($params) . "</blockquote>";
+print "<blockquote>" . Dump($q->Vars) . "</blockquote>";
 
 
