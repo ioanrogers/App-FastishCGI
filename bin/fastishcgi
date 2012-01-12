@@ -1,4 +1,4 @@
-#!env perl
+#!/usr/bin/perl
 
 # PODNAME: fastishcgi
 # ABSTRACT: run CGI scripts through a FastCGI interface
