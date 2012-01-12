@@ -1,4 +1,12 @@
-fastishcgid (0.0.1) unstable; urgency=low
+fastishcgi (0.0.2) unstable; urgency=low
+
+  * new upstream version
+  * fixed deps
+  * install systemd service file 
+
+ -- Ioan Rogers <ioan.rogers@gmail.com>  Thu, 12 Jan 2012 03:33:43 -0800
+
+fastishcgi (0.0.1) unstable; urgency=low
 
   * Initial release.
 

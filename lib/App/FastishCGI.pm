@@ -295,3 +295,7 @@ sub main_loop {
 
 1;
 
+=head1 SEE ALSO
+
+Originally based on L<NginxSimpleCGI|http://wiki.nginx.org/NginxSimpleCGI>
+

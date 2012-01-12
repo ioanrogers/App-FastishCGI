@@ -1,7 +1,7 @@
 Format-Specification: http://svn.debian.org/wsvn/dep/web/deps/dep5.mdwn?op=file&rev=135
 Maintainer: Ioan Rogers <ioan.rogers@gmail.com>
-Source: http://github.com/ioanrogers/app-fastishcgi
-Name: fastishcgid
+Source: http://github.com/ioanrogers/App-FastishCGI
+Name: fastishcgi
 
 Files: *
 Copyright: Ioan Rogers <ioan.rogers@gmail.com>

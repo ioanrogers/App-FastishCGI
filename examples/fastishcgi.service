@@ -2,7 +2,7 @@
 Description = FastCGI <-> CGI bridge 
 
 [Service]
-ExecStart = /usr/bin/fastishcgid
+ExecStart = /usr/bin/fastishcgi
 
 [Install]
 WantedBy = multi-user.target
