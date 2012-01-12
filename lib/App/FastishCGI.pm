@@ -65,7 +65,7 @@ sub log_debug {
 }
 
 sub html_error {
-    my ( $self, $req, $err_str ) = @_;
+    my ( $self, $req, $err_str, $output ) = @_;
 
     $self->log_error( $err_str, $req );
 
@@ -78,7 +78,11 @@ sub html_error {
 <body>
 <h1>CGI Error</h2>
 <h2>Filename: %s</h2>
+<h3>Error</h3>
 <blockquote class="err_msg">%s</blockquote>
+<h3>Output</h3>
+<blockquote class="err_msg">%s</blockquote>
+<h3>Script Environment</h3>
 <pre class="err_dump">
 %s
 </pre>
@@ -89,7 +93,7 @@ HTML
 
     my $html = sprintf $html_str, $req->param('SCRIPT_FILENAME'), $self->{css},
       $req->param('SCRIPT_FILENAME'),
-      $err_str, Dumper( $req->params );
+      $err_str, $output, Dumper( $req->params );
 
     $req->respond(
         $html,
@@ -121,7 +125,7 @@ sub setup_env {
 sub show_active_requests {
     my ($self) = @_;
 
-    my $reqs = 'Active requests [' . $self->{requests_total} .']';
+    my $reqs = 'Active requests [' . $self->{requests_total} . ']';
     foreach my $key ( keys %{ $self->{requests} } ) {
         $reqs .= " $key,";
     }
@@ -168,7 +172,13 @@ sub request_loop {
 
     my ( $wtr, $rdr, $err );
 
-    my $pid = IPC::Open3::open3( $wtr, $rdr, $err, $script_filename );
+    my $pid;
+    eval { $pid = IPC::Open3::open3( $wtr, $rdr, $err, $script_filename ); };
+
+    if ($@) {
+        $self->html_error( $req, "$script_filename: Failed to open script: $@" );
+        return;
+    }
 
     if ( !$pid ) {
         $self->html_error( $req, "$script_filename: Failed to open script: $!" );
@@ -205,8 +215,11 @@ sub request_loop {
             # that scripts should return 0 on success. However some of the scripts I
             # need to use return 1 instead.
             if ( $status != 0 && $status != 1 ) {
-                $self->html_error( $req,
-                    "Script $script_filename exited abnormally, with status: $status" );
+                $self->html_error(
+                    $req,
+                    "Script $script_filename exited abnormally, with status: $status",
+                    $self->{requests}->{$rid}->{buffer}
+                );
             } else {
                 $self->log_debug("[$rid] Script $script_filename completed");
                 $req->print_stdout( $self->{requests}->{$rid}->{buffer} );
@@ -219,7 +232,7 @@ sub request_loop {
     $self->{requests}->{$rid}->{timer} = AnyEvent->timer(
         after => $self->{timeout},
         cb    => sub {
-            $self->html_error($req, "Script '$script_filename' exceeded timeout value");
+            $self->html_error( $req, "Script '$script_filename' exceeded timeout value" );
             $self->clear_request($rid);
         }
     );
@@ -254,8 +267,9 @@ sub _init {
     } else {
         $self->{css} = <<CSS;
 <style type="text/css">
-pre { padding: 1em; border: 2px solid white }
-body {color: red; background-color: black; }
+pre { background-color: white; padding: 1em; border: 2px solid orange; color: black; }
+body {color: black; background-color: grey; }
+.err_msg {color: black; background-color: orange; }
 </style>
 CSS
 
@@ -273,27 +287,62 @@ sub main_loop {
 
     # TODO IO::Socket::INET6
     if ( defined $self->{socket} ) {
-        $self->log_debug( sprintf 'Listening on UNIX socket: %s', $self->{socket} );
-        $fcgi = new AnyEvent::FCGI(
+        $self->log_info( sprintf 'Listening on UNIX socket: %s', $self->{socket} );
+        $fcgi = AnyEvent::FCGI->new(
             socket     => $self->{socket},
             on_request => sub { $self->request_loop(@_); }
         );
 
     } else {
-        $self->log_debug( sprintf 'Listening on INET socket: %s:%s', $self->{ip}, $self->{port} );
-        $fcgi = new AnyEvent::FCGI(
+        $self->log_info( sprintf 'Listening on INET socket: %s:%s', $self->{ip}, $self->{port} );
+        $fcgi = AnyEvent::FCGI->new(
             port       => $self->{port},
             host       => $self->{ip},
             on_request => sub { $self->request_loop(@_) }
         );
     }
 
-    $self->log_debug( 'Entering main listen loop using ' . $AnyEvent::MODEL );
+    $self->log_info( 'Entering main listen loop using ' . $AnyEvent::MODEL );
     AnyEvent::CondVar->recv;
 
 }
 
 1;
+
+=head1 INSTALLATION 
+
+=over
+
+=item * 
+Normally, via CPAN, or
+
+=item *
+Debian sid packages available at L<https://github.com/ioanrogers/App-FastishCGI/downloads>
+
+=back
+
+=head1 USAGE
+
+=head2 RUNNING
+
+    $ fastishcgi -s /var/run/fastishcgi.sock
+  
+Try C<--options> for more options.
+
+A systemd service file is provided in the examples folder.
+
+=head1 NGINX CONFIGURATION:
+
+    server {
+        listen  0.0.0.0:80 default;
+        root /usr/lib/cgi-bin/;
+        location ~ /(.*\.cgi) {
+            fastcgi_pass unix:/var/run/fastishcgi.sock;
+            #fastcgi_pass 127.0.0.1:4001;
+            include fastcgi_params;
+            #fastcgi_param SCRIPT_FILENAME /usr/lib/cgi-bin/$1;
+        }
+     }
 
 =head1 SEE ALSO
 
